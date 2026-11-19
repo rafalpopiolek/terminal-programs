@@ -1,16 +1,20 @@
 //! Scrollable pager state, vim-like key handling and drawing.
 
+use std::num::NonZeroU16;
+
 use ratatui::Frame;
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use ratatui::buffer::{Buffer, CellDiffOption};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 
-use crate::markdown;
+use unicode_width::UnicodeWidthStr;
+
+use crate::markdown::{self, LinkArea};
 
 const MAX_CONTENT_WIDTH: u16 = 100;
-const MOUSE_SCROLL_LINES: usize = 3;
 
 const STATUS_BG: Color = Color::Rgb(40, 44, 52);
 const ACCENT: Color = Color::Rgb(198, 120, 221);
@@ -27,6 +31,7 @@ const HELP: &[(&str, &str)] = &[
     ("/ text Enter", "search"),
     ("n / N", "next / previous match"),
     ("Esc", "clear search highlight"),
+    ("Cmd/Ctrl + click", "open link"),
     ("r", "reload file"),
     ("q", "quit"),
 ];
@@ -49,6 +54,7 @@ pub struct Viewer {
     lines: Vec<Line<'static>>,
     searchable: Vec<Vec<char>>,
     headings: Vec<usize>,
+    links: Vec<LinkArea>,
     render_width: usize,
     page_height: usize,
     scroll: usize,
@@ -69,6 +75,7 @@ impl Viewer {
             lines: Vec::new(),
             searchable: Vec::new(),
             headings: Vec::new(),
+            links: Vec::new(),
             render_width: 0,
             page_height: 1,
             scroll: 0,
@@ -97,6 +104,7 @@ impl Viewer {
         self.searchable = document.lines.iter().map(|line| searchable_chars(line)).collect();
         self.lines = document.lines;
         self.headings = document.headings;
+        self.links = document.links;
         self.render_width = width;
         self.find_matches();
         self.clamp_scroll();
@@ -132,14 +140,6 @@ impl Viewer {
     fn scroll_to(&mut self, line: usize) {
         self.scroll = line;
         self.clamp_scroll();
-    }
-
-    pub fn handle_mouse(&mut self, mouse: MouseEvent) {
-        match mouse.kind {
-            MouseEventKind::ScrollDown => self.scroll_down(MOUSE_SCROLL_LINES),
-            MouseEventKind::ScrollUp => self.scroll_up(MOUSE_SCROLL_LINES),
-            _ => {}
-        }
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Outcome {
@@ -322,6 +322,7 @@ impl Viewer {
             })
             .collect();
         frame.render_widget(Paragraph::new(visible), content);
+        self.mark_hyperlinks(frame.buffer_mut(), content);
 
         if self.max_scroll() > 0 {
             let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
@@ -337,6 +338,24 @@ impl Viewer {
 
         if matches!(self.mode, Mode::Help) {
             draw_help(frame, body);
+        }
+    }
+
+    /// Wraps visible link text in OSC 8 sequences, so the terminal opens the URL on Cmd/Ctrl+click.
+    fn mark_hyperlinks(&self, buffer: &mut Buffer, area: Rect) {
+        let visible_lines = self.scroll..self.scroll + area.height as usize;
+        for link in self.links.iter().filter(|link| visible_lines.contains(&link.line)) {
+            let url: String = link.url.chars().filter(|c| !c.is_control()).collect();
+            let y = area.y + (link.line - self.scroll) as u16;
+            let mut column = link.columns.start;
+            while column < link.columns.end.min(area.width as usize) {
+                let cell = &mut buffer[(area.x + column as u16, y)];
+                let symbol = cell.symbol().to_string();
+                let width = symbol.width().max(1);
+                cell.set_symbol(&format!("\x1b]8;;{url}\x1b\\{symbol}\x1b]8;;\x1b\\"));
+                cell.set_diff_option(CellDiffOption::ForcedWidth(NonZeroU16::new(width as u16).unwrap_or(NonZeroU16::MIN)));
+                column += width;
+            }
         }
     }
 
@@ -577,5 +596,37 @@ mod tests {
         press(&mut sut, "]");
 
         assert_eq!(screen(&mut sut)[0], "Details");
+    }
+
+    /// Visible characters that the terminal receives wrapped in an OSC 8 hyperlink to `url`.
+    fn hyperlinked_text(sut: &mut Viewer, url: &str) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(WIDTH, HEIGHT)).unwrap();
+        terminal.draw(|frame| sut.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let opening = format!("\x1b]8;;{url}\x1b\\");
+        buffer
+            .content()
+            .iter()
+            .filter_map(|cell| cell.symbol().strip_prefix(&opening))
+            .map(|rest| rest.trim_end_matches("\x1b]8;;\x1b\\").to_string())
+            .collect()
+    }
+
+    #[test]
+    fn address_is_sent_to_the_terminal_as_a_clickable_hyperlink() {
+        let mut sut = viewer("Open https://example.com/a/very/long/path/that/wraps today".into());
+
+        assert_eq!(hyperlinked_text(&mut sut, "https://example.com/a/very/long/path/that/wraps"), "https://example.com/a/very/long/path/that/wraps");
+    }
+
+    #[test]
+    fn hyperlinks_follow_the_text_when_scrolling() {
+        let mut sut = viewer(numbered_lines(5) + "https://example.com\n");
+
+        let before = hyperlinked_text(&mut sut, "https://example.com");
+        press(&mut sut, "G");
+
+        assert_eq!(before, "");
+        assert_eq!(hyperlinked_text(&mut sut, "https://example.com"), "https://example.com");
     }
 }
