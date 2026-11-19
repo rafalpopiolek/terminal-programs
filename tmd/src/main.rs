@@ -1,13 +1,11 @@
 mod markdown;
 mod viewer;
 
-use std::io::stdout;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use ratatui::DefaultTerminal;
-use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind};
-use ratatui::crossterm::execute;
+use ratatui::crossterm::event::{self, Event, KeyEventKind};
 
 use viewer::{Outcome, Viewer};
 
@@ -20,9 +18,7 @@ fn main() -> Result<()> {
     let mut viewer = Viewer::new(title, source);
 
     let mut terminal = ratatui::init();
-    execute!(stdout(), EnableMouseCapture)?;
     let result = run(&mut terminal, &mut viewer, &path);
-    execute!(stdout(), DisableMouseCapture)?;
     ratatui::restore();
     result
 }
@@ -56,7 +52,6 @@ fn run(terminal: &mut DefaultTerminal, viewer: &mut Viewer, path: &Path) -> Resu
                     Err(error) => viewer.show_error(format!("{error:#}")),
                 },
             },
-            Event::Mouse(mouse) => viewer.handle_mouse(mouse),
             _ => {}
         }
     }
