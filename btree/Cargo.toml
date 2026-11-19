@@ -1,0 +1,18 @@
+[package]
+name = "btree"
+version = "0.1.0"
+edition = "2024"
+description = "A more readable `tree`: colors, gitignore awareness, collapsed chains, size column"
+
+[dependencies]
+clap = { version = "4.6.8", features = ["derive"] }
+globset = "0.4.21"
+ignore = "0.4.34"
+unicode-width = "0.2.3"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[profile.release]
+lto = true
+strip = true
